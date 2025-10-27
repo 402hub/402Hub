@@ -1,0 +1,33 @@
+{
+  "name": "@402hub/sdk",
+  "version": "1.0.0",
+  "description": "HTTP 402 Payment Required protocol for blockchain micropayments",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "test": "node test/test.js",
+    "demo": "node examples/complete-demo.js both",
+    "demo:server": "node examples/complete-demo.js server",
+    "demo:client": "node examples/complete-demo.js client"
+  },
+  "keywords": [
+    "http",
+    "402",
+    "payments",
+    "blockchain",
+    "micropayments",
+    "web3"
+  ],
+  "author": "AgentForge Team",
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "ethers": "^6.9.0"
+  },
+  "peerDependencies": {
+    "express": "^4.18.0"
+  },
+  "devDependencies": {
+    "express": "^4.18.2"
+  }
+}
