@@ -10,7 +10,7 @@ const { ethers } = require('ethers');
 require('dotenv').config();
 
 // Import the 402Hub SDK middleware
-const { createPaymentMiddleware } = require('@402hub/sdk');
+const { createPaymentMiddleware } = require('../src/middleware');
 
 const app = express();
 app.use(express.json());
