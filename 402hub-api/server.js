@@ -1,16 +1,14 @@
 /**
  * 402Hub API - Vertical-First Discovery Engine
- * 
- * This is the monetized service that provides intelligent agent discovery
- * Protected by x402 protocol for micropayments
+ * Standalone deployment version
  */
 
 const express = require('express');
 const { ethers } = require('ethers');
 require('dotenv').config();
 
-// Import the 402Hub SDK middleware
-const { createPaymentMiddleware } = require('../src/middleware');
+// Import LOCAL middleware (not from npm)
+const { createPaymentMiddleware } = require('./middleware');
 
 const app = express();
 app.use(express.json());
@@ -20,7 +18,7 @@ const provider = new ethers.JsonRpcProvider(process.env.BASE_SEPOLIA_RPC_URL);
 const wallet = new ethers.Wallet(process.env.HUB_API_PRIVATE_KEY, provider);
 
 // Contract ABI and Address (ServiceRegistry on Base Sepolia)
-const REGISTRY_ADDRESS = process.env.REGISTRY_CONTRACT_ADDRESS;
+const REGISTRY_ADDRESS = process.env.REGISTRY_CONTRACT_ADDRESS || '0x0000000000000000000000000000000000000000';
 const REGISTRY_ABI = [
     "function getServicesByVertical(string memory _vertical) external view returns (bytes32[] memory)",
     "function getService(bytes32 _serviceId) external view returns (tuple(address provider, string endpoint, string serviceType, string description, uint256 pricePerCall, string chain, uint256 totalCalls, uint256 totalRevenue, uint256 reputationScore, bool isActive, uint256 registeredAt))",
@@ -59,11 +57,11 @@ const VERTICALS = {
     }
 };
 
-// Apply x402 payment middleware to all protected routes
+// Apply x402 payment middleware to protected routes
 const paymentMiddleware = createPaymentMiddleware({
     wallet: wallet,
     price: ethers.parseEther("0.001"), // 0.001 ETH per API call
-    verifyOnChain: false // Set to true in production with PaymentVerifier contract
+    verifyOnChain: false // Set to true in production with deployed contract
 });
 
 // =============================================================================
@@ -78,11 +76,18 @@ app.get('/', (req, res) => {
         name: '402Hub API',
         version: '1.0.0',
         description: 'Vertical-First Discovery Engine for x402 Protocol',
+        status: 'operational',
+        wallet: wallet.address,
         endpoints: {
+            '/': 'API status (you are here)',
             '/verticals': 'List all available verticals',
-            '/discover?vertical=<type>': 'Discover agents by vertical (PROTECTED)',
-            '/search?q=<query>': 'Semantic search across all agents (PROTECTED)',
-            '/agent/:serviceId': 'Get specific agent details (PROTECTED)'
+            '/discover?vertical=<type>': 'Discover agents by vertical (PROTECTED - requires payment)',
+            '/search?q=<query>': 'Semantic search across all agents (PROTECTED - requires payment)',
+            '/agent/:serviceId': 'Get specific agent details (PROTECTED - requires payment)'
+        },
+        contract: {
+            registry: REGISTRY_ADDRESS,
+            network: 'Base Sepolia'
         }
     });
 });
@@ -107,10 +112,6 @@ app.get('/verticals', (req, res) => {
 
 /**
  * GET /discover?vertical=<type> - Vertical-First Discovery (PROTECTED)
- * 
- * Example: GET /discover?vertical=customer-support
- * 
- * Returns: Top agents in that vertical, ranked by reputation
  */
 app.get('/discover', paymentMiddleware, async (req, res) => {
     try {
@@ -171,7 +172,7 @@ app.get('/discover', paymentMiddleware, async (req, res) => {
             .sort((a, b) => {
                 const repA = parseInt(a.metrics.reputationScore);
                 const repB = parseInt(b.metrics.reputationScore);
-                return repB - repA; // Highest reputation first
+                return repB - repA;
             });
         
         res.json({
@@ -192,10 +193,6 @@ app.get('/discover', paymentMiddleware, async (req, res) => {
 
 /**
  * GET /search?q=<query> - Semantic Search (PROTECTED)
- * 
- * Example: GET /search?q=customer+support
- * 
- * Returns: Agents matching the search query across all verticals
  */
 app.get('/search', paymentMiddleware, async (req, res) => {
     try {
@@ -217,33 +214,10 @@ app.get('/search', paymentMiddleware, async (req, res) => {
             .map(([key]) => key);
         
         if (matchingVerticals.length === 0) {
-            // No matching verticals, search across all agents
-            const totalServices = await registryContract.getTotalServices();
-            const serviceIds = await registryContract.getAllServices(0, totalServices);
-            
-            const services = await Promise.all(
-                serviceIds.slice(0, 20).map(async (serviceId) => {
-                    const service = await registryContract.getService(serviceId);
-                    return {
-                        serviceId: serviceId,
-                        description: service.description,
-                        serviceType: service.serviceType,
-                        endpoint: service.endpoint,
-                        isActive: service.isActive
-                    };
-                })
-            );
-            
-            // Filter by description match
-            const matches = services.filter(s => 
-                s.isActive && 
-                s.description.toLowerCase().includes(query)
-            );
-            
             return res.json({
                 query: q,
-                results: matches,
-                message: matches.length === 0 ? 'No agents found matching your query' : null
+                results: [],
+                message: 'No agents found matching your query'
             });
         }
         
@@ -302,8 +276,6 @@ app.get('/search', paymentMiddleware, async (req, res) => {
 
 /**
  * GET /agent/:serviceId - Get Agent Details (PROTECTED)
- * 
- * Returns: Full details and metrics for a specific agent
  */
 app.get('/agent/:serviceId', paymentMiddleware, async (req, res) => {
     try {
@@ -346,11 +318,22 @@ app.get('/agent/:serviceId', paymentMiddleware, async (req, res) => {
     }
 });
 
+// Health check endpoint
+app.get('/health', (req, res) => {
+    res.json({ 
+        status: 'healthy',
+        timestamp: new Date().toISOString(),
+        uptime: process.uptime()
+    });
+});
+
 // Start server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 402Hub API running on port ${PORT}`);
     console.log(`💰 Payment price: 0.001 ETH per request`);
     console.log(`📍 Registry contract: ${REGISTRY_ADDRESS}`);
+    console.log(`💳 Wallet address: ${wallet.address}`);
     console.log(`\nProtected endpoints require HTTP 402 payment headers`);
+    console.log(`Visit http://localhost:${PORT}/ for API status\n`);
 });
