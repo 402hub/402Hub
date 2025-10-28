@@ -8,7 +8,7 @@ const { ethers } = require('ethers');
 require('dotenv').config();
 
 // Import LOCAL middleware (not from npm)
-const { createPaymentMiddleware } = require('./middleware');
+const { createPaymentMiddleware } = require('./middleware-standalone.js');
 
 const app = express();
 app.use(express.json());
