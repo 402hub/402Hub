@@ -8,14 +8,34 @@ const { ethers } = require('ethers');
 require('dotenv').config();
 
 // Import LOCAL middleware (not from npm)
-const { createPaymentMiddleware } = require('./middleware-standalone.js');
+const { createPaymentMiddleware } = require('./middleware');
 
 const app = express();
 app.use(express.json());
 
 // Initialize Ethereum provider
-const provider = new ethers.JsonRpcProvider(process.env.BASE_SEPOLIA_RPC_URL);
-const wallet = new ethers.Wallet(process.env.HUB_API_PRIVATE_KEY, provider);
+// FIXED: Use fallback to AGENTFORGE_PRIVATE_KEY and BASE_SEPOLIA_RPC
+const provider = new ethers.JsonRpcProvider(
+    process.env.BASE_SEPOLIA_RPC_URL || process.env.BASE_SEPOLIA_RPC || 'https://sepolia.base.org'
+);
+
+const privateKey = process.env.HUB_API_PRIVATE_KEY || process.env.AGENTFORGE_PRIVATE_KEY;
+
+if (!privateKey) {
+    console.error('❌ ERROR: Missing private key environment variable');
+    console.error('   Please set either HUB_API_PRIVATE_KEY or AGENTFORGE_PRIVATE_KEY');
+    process.exit(1);
+}
+
+// Validate private key format
+if (!privateKey.startsWith('0x') || privateKey.length !== 66) {
+    console.error('❌ ERROR: Invalid private key format');
+    console.error('   Private key must start with 0x and be 66 characters long');
+    console.error('   Received length:', privateKey.length);
+    process.exit(1);
+}
+
+const wallet = new ethers.Wallet(privateKey, provider);
 
 // Contract ABI and Address (ServiceRegistry on Base Sepolia)
 const REGISTRY_ADDRESS = process.env.REGISTRY_CONTRACT_ADDRESS || '0x0000000000000000000000000000000000000000';
@@ -43,297 +63,271 @@ const VERTICALS = {
     'data': {
         name: 'Data & Analytics',
         description: 'Agents that fetch, process, and analyze data',
-        keywords: ['data', 'analytics', 'research', 'insights']
+        keywords: ['data', 'analytics', 'insights', 'processing']
     },
-    'operations': {
-        name: 'Operations & Automation',
-        description: 'Agents that automate operational workflows and tasks',
-        keywords: ['automation', 'workflow', 'operations', 'tasks']
+    'automation': {
+        name: 'Workflow Automation',
+        description: 'Agents that automate repetitive tasks and workflows',
+        keywords: ['automation', 'workflow', 'task', 'process']
     },
-    'content': {
-        name: 'Content Creation',
-        description: 'Agents that generate, edit, or optimize content',
-        keywords: ['content', 'writing', 'copywriting', 'creative']
+    'creative': {
+        name: 'Creative & Content',
+        description: 'Agents that generate content, designs, and creative assets',
+        keywords: ['content', 'creative', 'design', 'generation']
+    },
+    'development': {
+        name: 'Development & DevOps',
+        description: 'Agents that help with coding, testing, and deployment',
+        keywords: ['code', 'development', 'devops', 'testing']
     }
 };
 
-// Apply x402 payment middleware to protected routes
-const paymentMiddleware = createPaymentMiddleware({
-    wallet: wallet,
-    price: ethers.parseEther("0.001"), // 0.001 ETH per API call
-    verifyOnChain: false // Set to true in production with deployed contract
-});
-
 // =============================================================================
-// PUBLIC ROUTES (Free)
+// PUBLIC ENDPOINTS (No payment required)
 // =============================================================================
 
 /**
- * GET / - API Status
+ * GET / - Health check and API info
  */
 app.get('/', (req, res) => {
     res.json({
-        name: '402Hub API',
+        service: '402Hub API',
         version: '1.0.0',
-        description: 'Vertical-First Discovery Engine for x402 Protocol',
-        status: 'operational',
+        description: 'Vertical-first discovery engine for x402 protocol agents',
         wallet: wallet.address,
+        network: 'Base Sepolia',
+        registry: REGISTRY_ADDRESS,
         endpoints: {
-            '/': 'API status (you are here)',
-            '/verticals': 'List all available verticals',
-            '/discover?vertical=<type>': 'Discover agents by vertical (PROTECTED - requires payment)',
-            '/search?q=<query>': 'Semantic search across all agents (PROTECTED - requires payment)',
-            '/agent/:serviceId': 'Get specific agent details (PROTECTED - requires payment)'
+            public: [
+                '/',
+                '/verticals',
+                '/health'
+            ],
+            premium: [
+                '/discover?vertical=VERTICAL',
+                '/search?q=QUERY',
+                '/service/:id'
+            ]
         },
-        contract: {
-            registry: REGISTRY_ADDRESS,
-            network: 'Base Sepolia'
-        }
+        docs: 'https://github.com/your-org/402hub'
     });
 });
 
 /**
- * GET /verticals - List all available verticals (Free)
+ * GET /health - Health check
+ */
+app.get('/health', (req, res) => {
+    res.json({
+        status: 'healthy',
+        timestamp: Date.now(),
+        wallet: wallet.address,
+        network: 'Base Sepolia'
+    });
+});
+
+/**
+ * GET /verticals - List all available verticals
+ * Free endpoint - no payment required
  */
 app.get('/verticals', (req, res) => {
+    const verticalList = Object.entries(VERTICALS).map(([slug, info]) => ({
+        slug,
+        name: info.name,
+        description: info.description,
+        count: 0 // TODO: Get actual count from registry
+    }));
+
     res.json({
-        verticals: Object.entries(VERTICALS).map(([key, value]) => ({
-            id: key,
-            name: value.name,
-            description: value.description,
-            keywords: value.keywords
-        }))
+        verticals: verticalList,
+        total: verticalList.length
     });
 });
 
 // =============================================================================
-// PROTECTED ROUTES (x402 Payment Required)
+// PROTECTED ENDPOINTS (Payment required via x402)
 // =============================================================================
 
 /**
- * GET /discover?vertical=<type> - Vertical-First Discovery (PROTECTED)
+ * Payment middleware configuration
+ * All discovery/search endpoints require 0.001 USDC
  */
-app.get('/discover', paymentMiddleware, async (req, res) => {
+const paymentRoutes = {
+    '/discover': `usdc:base_sepolia:${wallet.address}?amount=0.001`,
+    '/search': `usdc:base_sepolia:${wallet.address}?amount=0.001`,
+    '/service/:id': `usdc:base_sepolia:${wallet.address}?amount=0.0005`
+};
+
+const paymentMw = createPaymentMiddleware({
+    routes: paymentRoutes,
+    provider,
+    verifyTransaction: false, // Set to true for production
+    verifyOnChain: false // Set to true if using smart contract verification
+});
+
+/**
+ * GET /discover?vertical=VERTICAL - Discover agents by vertical
+ * Protected by payment middleware (0.001 USDC)
+ */
+app.get('/discover', paymentMw, async (req, res) => {
     try {
         const { vertical } = req.query;
-        
+
         if (!vertical) {
-            return res.status(400).json({ 
+            return res.status(400).json({
                 error: 'Missing vertical parameter',
-                availableVerticals: Object.keys(VERTICALS)
+                available: Object.keys(VERTICALS)
             });
         }
-        
+
         if (!VERTICALS[vertical]) {
-            return res.status(400).json({ 
-                error: 'Invalid vertical',
-                availableVerticals: Object.keys(VERTICALS)
+            return res.status(404).json({
+                error: 'Vertical not found',
+                available: Object.keys(VERTICALS)
             });
         }
-        
-        // Query on-chain registry for this vertical
-        const serviceIds = await registryContract.getServicesByVertical(vertical);
-        
-        if (serviceIds.length === 0) {
-            return res.json({
-                vertical: vertical,
-                verticalInfo: VERTICALS[vertical],
-                agents: [],
-                message: 'No agents registered in this vertical yet'
-            });
-        }
-        
-        // Fetch full service details
-        const services = await Promise.all(
-            serviceIds.map(async (serviceId) => {
-                const service = await registryContract.getService(serviceId);
-                return {
-                    serviceId: serviceId,
+
+        console.log(`✅ Payment verified! Discovering ${vertical} agents`);
+        console.log(`   Paid by: ${req.paymentSigner}`);
+
+        // Query blockchain registry
+        let services = [];
+        try {
+            const serviceIds = await registryContract.getServicesByVertical(vertical);
+            
+            for (const id of serviceIds) {
+                const service = await registryContract.getService(id);
+                services.push({
+                    id: id,
                     provider: service.provider,
                     endpoint: service.endpoint,
-                    serviceType: service.serviceType,
+                    type: service.serviceType,
                     description: service.description,
-                    pricePerCall: ethers.formatEther(service.pricePerCall),
+                    pricePerCall: ethers.formatUnits(service.pricePerCall, 6), // USDC has 6 decimals
                     chain: service.chain,
-                    metrics: {
-                        totalCalls: service.totalCalls.toString(),
-                        totalRevenue: ethers.formatEther(service.totalRevenue),
-                        reputationScore: service.reputationScore.toString()
-                    },
-                    isActive: service.isActive,
-                    registeredAt: new Date(Number(service.registeredAt) * 1000).toISOString()
-                };
-            })
-        );
-        
-        // Filter active services and sort by reputation
-        const activeServices = services
-            .filter(s => s.isActive)
-            .sort((a, b) => {
-                const repA = parseInt(a.metrics.reputationScore);
-                const repB = parseInt(b.metrics.reputationScore);
-                return repB - repA;
-            });
-        
+                    reputation: Number(service.reputationScore),
+                    totalCalls: Number(service.totalCalls),
+                    isActive: service.isActive
+                });
+            }
+        } catch (error) {
+            console.error('Registry query failed:', error.message);
+            // Continue with empty services array
+        }
+
         res.json({
-            vertical: vertical,
-            verticalInfo: VERTICALS[vertical],
-            totalAgents: activeServices.length,
-            agents: activeServices
+            vertical: VERTICALS[vertical].name,
+            description: VERTICALS[vertical].description,
+            services,
+            total: services.length,
+            paidBy: req.paymentSigner
         });
-        
+
     } catch (error) {
         console.error('Discovery error:', error);
-        res.status(500).json({ 
-            error: 'Discovery failed', 
-            message: error.message 
-        });
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
 /**
- * GET /search?q=<query> - Semantic Search (PROTECTED)
+ * GET /search?q=QUERY - Search agents by keywords
+ * Protected by payment middleware (0.001 USDC)
  */
-app.get('/search', paymentMiddleware, async (req, res) => {
+app.get('/search', paymentMw, async (req, res) => {
     try {
         const { q } = req.query;
-        
+
         if (!q) {
             return res.status(400).json({ error: 'Missing search query' });
         }
-        
+
+        console.log(`✅ Payment verified! Searching for: ${q}`);
+        console.log(`   Paid by: ${req.paymentSigner}`);
+
         const query = q.toLowerCase();
-        
-        // Find matching verticals based on keywords
-        const matchingVerticals = Object.entries(VERTICALS)
-            .filter(([key, value]) => {
-                return value.keywords.some(keyword => 
-                    query.includes(keyword) || keyword.includes(query)
-                ) || query.includes(key) || value.name.toLowerCase().includes(query);
-            })
-            .map(([key]) => key);
-        
-        if (matchingVerticals.length === 0) {
-            return res.json({
-                query: q,
-                results: [],
-                message: 'No agents found matching your query'
-            });
-        }
-        
-        // Fetch agents from matching verticals
-        const allAgents = [];
-        
-        for (const vertical of matchingVerticals) {
-            const serviceIds = await registryContract.getServicesByVertical(vertical);
+        const matches = [];
+
+        // Search through verticals
+        for (const [slug, info] of Object.entries(VERTICALS)) {
+            const searchText = `${info.name} ${info.description} ${info.keywords.join(' ')}`.toLowerCase();
             
-            for (const serviceId of serviceIds) {
-                const service = await registryContract.getService(serviceId);
-                
-                if (service.isActive) {
-                    allAgents.push({
-                        serviceId: serviceId,
-                        provider: service.provider,
-                        endpoint: service.endpoint,
-                        serviceType: service.serviceType,
-                        description: service.description,
-                        pricePerCall: ethers.formatEther(service.pricePerCall),
-                        chain: service.chain,
-                        metrics: {
-                            reputationScore: service.reputationScore.toString(),
-                            totalCalls: service.totalCalls.toString()
-                        }
-                    });
-                }
+            if (searchText.includes(query)) {
+                matches.push({
+                    vertical: slug,
+                    name: info.name,
+                    description: info.description,
+                    relevance: 'high' // TODO: Implement proper relevance scoring
+                });
             }
         }
-        
-        // Sort by reputation
-        allAgents.sort((a, b) => {
-            const repA = parseInt(a.metrics.reputationScore);
-            const repB = parseInt(b.metrics.reputationScore);
-            return repB - repA;
-        });
-        
+
         res.json({
             query: q,
-            matchedVerticals: matchingVerticals.map(v => ({
-                id: v,
-                name: VERTICALS[v].name
-            })),
-            totalResults: allAgents.length,
-            results: allAgents
+            results: matches,
+            total: matches.length,
+            paidBy: req.paymentSigner
         });
-        
+
     } catch (error) {
         console.error('Search error:', error);
-        res.status(500).json({ 
-            error: 'Search failed', 
-            message: error.message 
-        });
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
 /**
- * GET /agent/:serviceId - Get Agent Details (PROTECTED)
+ * GET /service/:id - Get detailed info about a specific service
+ * Protected by payment middleware (0.0005 USDC)
  */
-app.get('/agent/:serviceId', paymentMiddleware, async (req, res) => {
+app.get('/service/:id', paymentMw, async (req, res) => {
     try {
-        const { serviceId } = req.params;
-        
-        const service = await registryContract.getService(serviceId);
-        
-        if (service.provider === ethers.ZeroAddress) {
-            return res.status(404).json({ error: 'Agent not found' });
-        }
-        
-        res.json({
-            serviceId: serviceId,
-            provider: service.provider,
-            endpoint: service.endpoint,
-            serviceType: service.serviceType,
-            description: service.description,
-            pricing: {
-                pricePerCall: ethers.formatEther(service.pricePerCall),
-                currency: 'ETH'
-            },
-            chain: service.chain,
-            metrics: {
-                totalCalls: service.totalCalls.toString(),
-                totalRevenue: ethers.formatEther(service.totalRevenue),
-                reputationScore: service.reputationScore.toString()
-            },
-            status: {
+        const { id } = req.params;
+
+        console.log(`✅ Payment verified! Getting service: ${id}`);
+        console.log(`   Paid by: ${req.paymentSigner}`);
+
+        // Query service from registry
+        try {
+            const service = await registryContract.getService(id);
+
+            res.json({
+                id,
+                provider: service.provider,
+                endpoint: service.endpoint,
+                type: service.serviceType,
+                description: service.description,
+                pricePerCall: ethers.formatUnits(service.pricePerCall, 6),
+                chain: service.chain,
+                reputation: Number(service.reputationScore),
+                totalCalls: Number(service.totalCalls),
+                totalRevenue: ethers.formatUnits(service.totalRevenue, 6),
                 isActive: service.isActive,
-                registeredAt: new Date(Number(service.registeredAt) * 1000).toISOString()
-            }
-        });
-        
+                registeredAt: Number(service.registeredAt),
+                paidBy: req.paymentSigner
+            });
+
+        } catch (error) {
+            console.error('Service not found:', error.message);
+            res.status(404).json({ error: 'Service not found' });
+        }
+
     } catch (error) {
-        console.error('Agent details error:', error);
-        res.status(500).json({ 
-            error: 'Failed to fetch agent details', 
-            message: error.message 
-        });
+        console.error('Service fetch error:', error);
+        res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// Health check endpoint
-app.get('/health', (req, res) => {
-    res.json({ 
-        status: 'healthy',
-        timestamp: new Date().toISOString(),
-        uptime: process.uptime()
-    });
-});
+// =============================================================================
+// START SERVER
+// =============================================================================
 
-// Start server
 const PORT = process.env.PORT || 3000;
+
 app.listen(PORT, () => {
-    console.log(`🚀 402Hub API running on port ${PORT}`);
-    console.log(`💰 Payment price: 0.001 ETH per request`);
-    console.log(`📍 Registry contract: ${REGISTRY_ADDRESS}`);
-    console.log(`💳 Wallet address: ${wallet.address}`);
-    console.log(`\nProtected endpoints require HTTP 402 payment headers`);
-    console.log(`Visit http://localhost:${PORT}/ for API status\n`);
+    console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('🚀 402Hub API running on port', PORT);
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log('💰 Payment price: 0.001 USDC per request');
+    console.log('📍 Registry contract:', REGISTRY_ADDRESS);
+    console.log('💳 Wallet address:', wallet.address);
+    console.log('🌐 Network: Base Sepolia');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
 });
